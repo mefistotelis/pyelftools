@@ -34,6 +34,21 @@ def struct_parse(struct, stream, stream_pos=None):
         raise ELFParseError(str(e))
 
 
+def struct_write(struct, obj, stream, stream_pos=None):
+    """ Convenience function for using the given struct to write into a stream.
+        If stream_pos is provided, the stream is seeked to this position before
+        the writing is done. Otherwise, the current position of the stream is
+        used.
+        Wraps the error thrown by construct with ELFParseError.
+    """
+    try:
+        if stream_pos is not None:
+            stream.seek(stream_pos)
+        return struct.build_stream(obj,stream)
+    except ConstructError as e:
+        raise ELFParseError(str(e))
+
+
 def parse_cstring_from_stream(stream, stream_pos=None):
     """ Parse a C-string from the given stream. The string is returned without
         the terminating \x00 byte. If the terminating byte wasn't found, None

@@ -20,7 +20,7 @@ except ImportError:
 
 from ..common.py3compat import BytesIO
 from ..common.exceptions import ELFError
-from ..common.utils import struct_parse, elf_assert
+from ..common.utils import struct_parse, struct_write, elf_assert
 from .structs import ELFStructs
 from .sections import (
         Section, StringTableSection, SymbolTableSection,
@@ -69,6 +69,11 @@ class ELFFile(object):
 
         self._file_stringtable_section = self._get_file_stringtable()
         self._section_name_map = None
+
+    def write_changes(self):
+        """ Writes any modifications in headers
+        """
+        self._write_elf_header()
 
     def num_sections(self):
         """ Number of sections in the file
@@ -384,6 +389,12 @@ class ELFFile(object):
             of this object.
         """
         return struct_parse(self.structs.Elf_Ehdr, self.stream, stream_pos=0)
+
+    def _write_elf_header(self):
+        """ Writes the ELF file header and assigns the result to attributes
+            of this object.
+        """
+        return struct_write(self.structs.Elf_Ehdr, self.header, self.stream, stream_pos=0)
 
     def _read_dwarf_section(self, section, relocate_dwarf_sections):
         """ Read the contents of a DWARF section from the stream and return a
