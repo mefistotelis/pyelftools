@@ -23,12 +23,21 @@ class Section(object):
         self.header = header
         self.name = name
         self.stream = stream
+        self._data_update = None
 
     def data(self):
-        """ The section data from the file.
+        """ The section data, either from the file, or updated.
         """
+        if self._data_update is not None:
+            return self._data_update
         self.stream.seek(self['sh_offset'])
         return self.stream.read(self['sh_size'])
+
+    def set_data(self, data_buf):
+        """ Set the updated section data.
+        """
+        self._data_update = data_buf
+        self['sh_size'] = len(data_buf)
 
     def is_null(self):
         """ Is this a null section?
@@ -65,8 +74,11 @@ class StringTableSection(Section):
     def get_string(self, offset):
         """ Get the string stored at the given offset in this string table.
         """
-        table_offset = self['sh_offset']
-        s = parse_cstring_from_stream(self.stream, table_offset + offset)
+        if self._data_update is not None:
+            s = parse_cstring_from_stream(io.BytesIO(self._data_update), offset)
+        else:
+            table_offset = self['sh_offset']
+            s = parse_cstring_from_stream(self.stream, table_offset + offset)
         return s.decode('ascii')
 
 
@@ -94,10 +106,15 @@ class SymbolTableSection(Section):
         """ Get the symbol at index #n from the table (Symbol object)
         """
         # Grab the symbol's entry from the stream
-        entry_offset = self['sh_offset'] + n * self['sh_entsize']
+        if self._data_update is not None:
+            entry_offset = n * self['sh_entsize']
+            input_strm = io.BytesIO(self._data_update)
+        else:
+            entry_offset = self['sh_offset'] + n * self['sh_entsize']
+            input_strm = self.stream
         entry = struct_parse(
             self.elfstructs.Elf_Sym,
-            self.stream,
+            input_strm,
             stream_pos=entry_offset)
         # Find the symbol name in the associated string table
         name = self.stringtable.get_string(entry['st_name'])
@@ -162,10 +179,15 @@ class SUNWSyminfoTableSection(Section):
             store the current version of the syminfo table.
         """
         # Grab the symbol's entry from the stream
-        entry_offset = self['sh_offset'] + n * self['sh_entsize']
+        if self._data_update is not None:
+            entry_offset = n * self['sh_entsize']
+            input_strm = io.BytesIO(self._data_update)
+        else:
+            entry_offset = self['sh_offset'] + n * self['sh_entsize']
+            input_strm = self.stream
         entry = struct_parse(
             self.elfstructs.Elf_Sunw_Syminfo,
-            self.stream,
+            input_strm,
             stream_pos=entry_offset)
         # Find the symbol name in the associated symbol table
         name = self.symboltable.get_symbol(n).name

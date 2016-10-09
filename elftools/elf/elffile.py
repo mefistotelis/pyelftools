@@ -67,6 +67,7 @@ class ELFFile(object):
         self.stream.seek(0)
         self.e_ident_raw = self.stream.read(16)
 
+        self._section_update = {}
         self._file_stringtable_section = self._get_file_stringtable()
         self._section_name_map = None
 
@@ -74,6 +75,8 @@ class ELFFile(object):
         """ Writes any modifications in headers
         """
         self._write_elf_header()
+        for n, obj in self._section_update.items():
+            self._write_section_header(n, obj.header)
 
     def num_sections(self):
         """ Number of sections in the file
@@ -84,8 +87,15 @@ class ELFFile(object):
         """ Get the section at index #n from the file (Section object or a
             subclass)
         """
+        if n in self._section_update:
+            return self._section_update[n]
         section_header = self._get_section_header(n)
         return self._make_section(section_header)
+
+    def set_section(self, n, obj):
+        self._update_section_header(n, obj)
+        #TODO if section name changed, prepare to update it
+        #TODO if section data length changed, prepare modifications for the subsequent sections
 
     def get_section_by_name(self, name):
         """ Get a section from the file, by name. Return None if no such
@@ -94,18 +104,21 @@ class ELFFile(object):
         # The first time this method is called, construct a name to number
         # mapping
         #
-        if self._section_name_map is None:
-            self._section_name_map = {}
-            for i, sec in enumerate(self.iter_sections()):
-                self._section_name_map[sec.name] = i
-        secnum = self._section_name_map.get(name, None)
+        secnum = self._get_section_number_by_name(name)
         return None if secnum is None else self.get_section(secnum)
+
+    def set_section_by_name(self, name, obj):
+        secnum = self._get_section_number_by_name(name)
+        self.set_section(secnum, obj)
 
     def iter_sections(self):
         """ Yield all the sections in the file
         """
         for i in range(self.num_sections()):
-            yield self.get_section(i)
+            if i in self._section_update:
+                yield self._section_update[i]
+            else:
+                yield self.get_section(i)
 
     def num_segments(self):
         """ Number of segments in the file
@@ -275,9 +288,22 @@ class ELFFile(object):
     def _get_section_header(self, n):
         """ Find the header of section #n, parse it and return the struct
         """
+        if n in self._section_update:
+            return self._section_update[n].header
         return struct_parse(
             self.structs.Elf_Shdr,
             self.stream,
+            stream_pos=self._section_offset(n))
+
+    def _update_section_header(self, n, obj):
+        """ Update the header of section #n, by storing a new header
+        """
+        self._section_update[n] = obj
+
+    def _write_section_header(self, n, hdr):
+        """ Writes the header of section back into file.
+        """
+        return struct_write(self.structs.Elf_Shdr, hdr, self.stream,
             stream_pos=self._section_offset(n))
 
     def _get_section_name(self, section_header):
@@ -286,6 +312,19 @@ class ELFFile(object):
         """
         name_offset = section_header['sh_name']
         return self._file_stringtable_section.get_string(name_offset)
+
+    def _get_section_number_by_name(self, name):
+        """ Get number of a section, by name. Return None if no such
+            section exists.
+        """
+        # The first time this method is called, construct a name to number
+        # mapping
+        #
+        if self._section_name_map is None:
+            self._section_name_map = {}
+            for i, sec in enumerate(self.iter_sections()):
+                self._section_name_map[sec.name] = i
+        return self._section_name_map.get(name, None)
 
     def _make_section(self, section_header):
         """ Create a section object of the appropriate type
