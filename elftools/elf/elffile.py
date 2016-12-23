@@ -68,6 +68,7 @@ class ELFFile(object):
         self.e_ident_raw = self.stream.read(16)
 
         self._section_update = {}
+        self._segment_update = {}
         self._file_stringtable_section = self._get_file_stringtable()
         self._section_name_map = None
 
@@ -81,6 +82,8 @@ class ELFFile(object):
             if obj['sh_type'] == 'SHT_NOBITS':
                 continue
             obj.write_data()
+        for n, seg in self._segment_update.items():
+            self._write_segment_header(n, seg.header)
 
     def num_sections(self):
         """ Number of sections in the file
@@ -132,6 +135,8 @@ class ELFFile(object):
     def get_segment(self, n):
         """ Get the segment at index #n from the file (Segment object)
         """
+        if n in self._segment_update:
+            return self._segment_update[n]
         segment_header = self._get_segment_header(n)
         return self._make_segment(segment_header)
 
@@ -139,7 +144,10 @@ class ELFFile(object):
         """ Yield all the segments in the file
         """
         for i in range(self.num_segments()):
-            yield self.get_segment(i)
+            if i in self._segment_update:
+                yield self._segment_update[i]
+            else:
+                yield self.get_segment(i)
 
     def address_offsets(self, start, size=1):
         """ Yield a file offset for each ELF segment containing a memory region.
@@ -416,6 +424,17 @@ class ELFFile(object):
         return struct_parse(
             self.structs.Elf_Phdr,
             self.stream,
+            stream_pos=self._segment_offset(n))
+
+    def _update_segment_header(self, n, seg):
+        """ Update the header of segment #n, by storing a new header
+        """
+        self._segment_update[n] = seg
+
+    def _write_segment_header(self, n, hdr):
+        """ Writes the header of segment back into file.
+        """
+        return struct_write(self.structs.Elf_Phdr, hdr, self.stream,
             stream_pos=self._segment_offset(n))
 
     def _get_file_stringtable(self):
