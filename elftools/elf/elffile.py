@@ -100,9 +100,55 @@ class ELFFile(object):
         return self._make_section(section_header)
 
     def set_section(self, n, obj):
+        old_obj = self.get_section(n)
         self._update_section_header(n, obj)
-        #TODO if section name changed, prepare to update it
-        #TODO if section data length changed, prepare modifications for the subsequent sections
+        if old_obj.name != obj.name:
+            #TODO if section name changed, prepare to update it
+            raise ELFError('Renaming sections on update is not implemented yet')
+        if n >= self['e_shnum']:
+            #TODO if section index is beyond existing, add new section
+            raise ELFError('Adding new sections is not implemented yet')
+        if obj['sh_size'] != old_obj['sh_size']:
+            #TODO if section data length changed, prepare modifications for the subsequent sections
+            # Prepare an array of all sections, sorted by offset
+            all_sections = []
+            for i in range(0, self['e_shnum']):
+                nx_obj = self.get_section(i)
+                all_sections.append({'i' : i, 'obj' : nx_obj})
+            # Treat main header as a special section
+            if 1:
+                section_header = {'sh_offset' : 0, 'sh_size' : self['e_ehsize'], 'sh_addralign' : 0x20, 'sh_type' : 'SHT_PROGBITS'}
+                nx_obj = Section(section_header, "main_header_dummy_container", None)
+                all_sections.append({'i' : -1, 'obj' : nx_obj})
+            # Treat program header table as a special section
+            if self['e_phoff'] > 0:
+                section_header = {'sh_offset' : self['e_phoff'], 'sh_size' : self['e_phnum'] * self['e_phentsize'], 'sh_addralign' : 0x20, 'sh_type' : 'SHT_PROGBITS'}
+                nx_obj = Section(section_header, "program_headers_dummy_container", None)
+                all_sections.append({'i' : -2, 'obj' : nx_obj})
+            # Treat section header table as a special section
+            if self['e_shoff'] > 0:
+                section_header = {'sh_offset' : self['e_shoff'], 'sh_size' : self['e_shnum'] * self['e_shentsize'], 'sh_addralign' : 0x20, 'sh_type' : 'SHT_PROGBITS'}
+                nx_obj = Section(section_header, "section_headers_dummy_container", None)
+                all_sections.append({'i' : -3, 'obj' : nx_obj})
+            # Sort by offset
+            all_sections = sorted(all_sections, key=lambda nx: nx['obj']['sh_offset'])
+            # Now go through the sections and update them to make sure they don't overlap in file
+            pv_end_offs = 0
+            for nx in all_sections:
+                i = nx['i']
+                nx_obj = nx['obj']
+                if nx_obj['sh_offset'] != pv_end_offs:
+                    if (not nx_obj.is_data_modified()) and (i >= 0) and (nx_obj['sh_type'] != 'SHT_NOBITS'):
+                        nx_obj.set_data(nx_obj.data())
+                    nx_obj.header['sh_offset'] = pv_end_offs
+                if (i >= 0):
+                    self._update_section_header(i, nx_obj)
+                elif (i == -2):
+                     self.header['e_phoff'] = nx_obj['sh_offset']
+                elif (i == -3):
+                     self.header['e_shoff'] = nx_obj['sh_offset']
+                self.shift_segment_offsets_range(nx['obj']['sh_offset'], nx['obj']['sh_size'], nx_obj['sh_offset'], nx_obj['sh_size'])
+                pv_end_offs = nx_obj['sh_offset'] + nx_obj['sh_size']
 
     def get_section_by_name(self, name):
         """ Get a section from the file, by name. Return None if no such
@@ -139,6 +185,21 @@ class ELFFile(object):
             return self._segment_update[n]
         segment_header = self._get_segment_header(n)
         return self._make_segment(segment_header)
+
+    def shift_segment_offsets_range(self, prev_start, prev_size, next_start, next_size):
+        """ Update segment headers so that given range of offsets is mapped to the new range.
+        """
+        for i in range(self.num_segments()):
+            seg = self.get_segment(i)
+            if (seg['p_offset'] <= prev_start) and (seg['p_offset'] + seg['p_filesz'] > prev_start):
+                if seg['p_offset'] + seg['p_filesz'] >= prev_start + prev_size:
+                    seg.header['p_filesz'] += next_size - prev_size
+                seg.header['p_offset'] += next_start - prev_start
+            elif (seg['p_offset'] <= prev_start + prev_size) and (seg['p_offset'] + seg['p_filesz'] > prev_start + prev_size):
+                seg.header['p_filesz'] += next_start - prev_start
+            else:
+                continue
+            self._update_segment_header(i, seg)
 
     def iter_segments(self):
         """ Yield all the segments in the file
