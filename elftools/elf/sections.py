@@ -26,10 +26,12 @@ class Section(object):
         self._data_update = None
 
     def data(self):
-        """ The section data, either from the file, or updated.
+        """ The section data, either from the stream, or updated.
         """
         if self._data_update is not None:
             return self._data_update
+        if self['sh_type'] == 'SHT_NOBITS':
+            return b''
         self.stream.seek(self['sh_offset'])
         return self.stream.read(self['sh_size'])
 
@@ -37,7 +39,17 @@ class Section(object):
         """ Set the updated section data.
         """
         self._data_update = data_buf
-        self['sh_size'] = len(data_buf)
+        self.header['sh_size'] = len(data_buf)
+
+    def write_data(self):
+        """ Writes the updated section data back to stream.
+        """
+        if self._data_update is not None:
+            self.stream.seek(self['sh_offset'])
+            return self.stream.write(self._data_update[:self['sh_size']])
+
+    def is_data_modified(self):
+        return self._data_update is not None
 
     def is_null(self):
         """ Is this a null section?

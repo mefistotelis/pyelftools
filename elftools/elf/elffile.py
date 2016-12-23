@@ -77,6 +77,10 @@ class ELFFile(object):
         self._write_elf_header()
         for n, obj in self._section_update.items():
             self._write_section_header(n, obj.header)
+        for n, obj in self._section_update.items():
+            if obj['sh_type'] == 'SHT_NOBITS':
+                continue
+            obj.write_data()
 
     def num_sections(self):
         """ Number of sections in the file
