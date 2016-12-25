@@ -33,6 +33,7 @@ from .gnuversions import (
         GNUVerSymSection)
 from .segments import Segment, InterpSegment, NoteSegment
 from ..dwarf.dwarfinfo import DWARFInfo, DebugSectionDescriptor, DwarfConfig
+from .constants import SH_FLAGS
 
 
 class ELFFile(object):
@@ -80,7 +81,8 @@ class ELFFile(object):
         for n, obj in self._section_update.items():
             self._write_section_header(n, obj.header)
         for n, obj in self._section_update.items():
-            if obj['sh_type'] == 'SHT_NOBITS':
+            if (obj['sh_type'] == 'SHT_NOBITS' or
+              obj['sh_type'] == 'SHT_NULL'):
                 continue
             obj.write_data()
         for n, seg in self._segment_update.items():
@@ -117,6 +119,7 @@ class ELFFile(object):
             self.linearize_sections()
         if obj['sh_size'] != old_obj['sh_size'] or obj['sh_addr'] != old_obj['sh_addr']:
             self.update_segments_to_sections_mapping(sect_to_seg)
+            self._reorder_segment_headers()
 
     def get_section_by_name(self, name):
         """ Get a section from the file, by name. Return None if no such
@@ -175,6 +178,31 @@ class ELFFile(object):
                 end <= seg['p_vaddr'] + seg['p_filesz']):
                 yield start - seg['p_vaddr'] + seg['p_offset']
 
+    def segments_are_equivalent(self, seg1, seg2):
+            return (seg1['p_type'] == seg2['p_type'] and
+              seg1['p_flags'] == seg2['p_flags'] and
+              seg1['p_align'] == seg2['p_align'])
+
+    def get_segment_index_equivalent_touching_or_overlaping_address_range(self, equiv_seg, start, size=1):
+        for i in range(self.num_segments()):
+            seg = self.get_segment(i)
+            # check if seg is equivalent
+            if (not self.segments_are_equivalent(seg, equiv_seg)):
+                continue
+            # check if seg is within given address range
+            if (start >= seg['p_vaddr'] and
+              start + size <= seg['p_vaddr'] + seg['p_memsz']):
+                return i
+            # check if seg start touches/overlaps given address range
+            if (start < seg['p_vaddr'] and
+              start + size >= seg['p_vaddr']):
+                return i
+            # check if seg end touches/overlaps given address range
+            if (start <= seg['p_vaddr'] + seg['p_memsz'] and
+              start + size > seg['p_vaddr'] + seg['p_memsz']):
+                return i
+        return -1
+
     def linearize_sections(self):
         # Prepare an array of all sections, sorted by offset
         all_sections = []
@@ -199,14 +227,15 @@ class ELFFile(object):
             obj = Section(section_header, "section_headers_dummy_container", None)
             all_sections.append({'i' : -3, 'obj' : obj, 'seg' : -1})
         # Sort by offset
-        all_sections = sorted(all_sections, key=lambda nx: nx['obj']['sh_offset'])
+        all_sections = sorted(all_sections, key=lambda nx: (nx['obj']['sh_offset'],nx['obj']['sh_size']))
         # Now go through the sections and update them to make sure they don't overlap in file, and go closely after each other
         pv_end_offs = 0
         for nx in all_sections:
             i = nx['i']
             obj = nx['obj']
             if obj['sh_offset'] != pv_end_offs:
-                if (not obj.is_data_modified()) and (i >= 0) and (obj['sh_type'] != 'SHT_NOBITS'):
+                if ((not obj.is_data_modified()) and (i >= 0) and
+                  (obj['sh_type'] != 'SHT_NOBITS') and (obj['sh_type'] != 'SHT_NULL')):
                     obj.set_data(obj.data())
                 obj.header['sh_offset'] = pv_end_offs
             if (i >= 0):
@@ -224,19 +253,26 @@ class ELFFile(object):
         sect_to_seg = [-1] * self['e_shnum']
         for nseg in range(0, self['e_phnum']):
             seg = self.get_segment(nseg)
+            if (seg['p_type'] == 'PT_NULL'):
+                continue
             for i in range(0, self['e_shnum']):
                 obj = self.get_section(i)
+                if (obj['sh_flags'] & SH_FLAGS.SHF_ALLOC) == 0:
+                    continue
+                if (obj['sh_type'] == 'SHT_NULL'):
+                    continue
                 if (seg.section_in_segment(obj)):
                     sect_to_seg[i] = nseg
         return sect_to_seg
 
     def update_segments_to_sections_mapping(self, sect_to_seg):
-        #TODO this function should be able to divide a segment when new disk area or memory area is not continous
         # Mark used segments for update
         for nseg in set(sect_to_seg):
             if (nseg < 0): continue
             seg = self.get_segment(nseg)
             seg.header['p_offset'] = -1
+            seg.header['p_filesz'] = 0
+            seg.header['p_memsz'] = 0
             self._update_segment_header(nseg, seg)
         # Update used segments to represent the updated sections
         for i in range(0, self['e_shnum']):
@@ -244,15 +280,30 @@ class ELFFile(object):
             nseg = sect_to_seg[i]
             if (nseg < 0):
                 continue
-            # Update segment
+            # Get the original segment
             seg = self.get_segment(nseg)
-            if seg['p_offset'] == -1:
+            # Check if we should update equivalent segment instead of original one
+            if (seg['p_offset'] == -1):
+                nseg_eq = nseg
+            else:
+                nseg_eq = self.get_segment_index_equivalent_touching_or_overlaping_address_range(seg, obj['sh_addr'], obj['sh_size'])
+            # Update segment
+            if (seg['p_offset'] == -1) or (nseg_eq < 0):
+                # If the segment was not associated to any section yet, do the association
+                # Also overwrite the association if we are going to add a new segment
                 seg.header['p_offset'] = obj['sh_offset']
                 seg.header['p_filesz'] = obj['sh_size']
                 seg.header['p_vaddr'] = obj['sh_addr']
                 seg.header['p_paddr'] = obj['sh_addr']
                 seg.header['p_memsz'] = obj['sh_size']
+                if (nseg_eq < 0):
+                    nseg = self._add_segment_header(seg)
+                else:
+                    self._update_segment_header(nseg, seg)
             else:
+                # Being here means we have a segment touching the current memory area; extend it
+                nseg = nseg_eq
+                seg = self.get_segment(nseg)
                 if seg['p_offset'] > obj['sh_offset']:
                     seg.header['p_filesz'] += seg['p_offset'] - obj['sh_offset']
                     seg.header['p_offset'] = obj['sh_offset']
@@ -264,7 +315,7 @@ class ELFFile(object):
                     seg.header['p_paddr'] = obj['sh_addr']
                 elif seg['p_vaddr'] + seg['p_memsz'] < obj['sh_addr'] + obj['sh_size']:
                     seg.header['p_memsz'] = obj['sh_addr'] + obj['sh_size'] - seg['p_vaddr']
-            self._update_segment_header(nseg, seg)
+                self._update_segment_header(nseg, seg)
 
     def has_dwarf_info(self):
         """ Check whether this file appears to have debugging information.
@@ -535,6 +586,41 @@ class ELFFile(object):
         """ Update the header of segment #n, by storing a new header
         """
         self._segment_update[n] = seg
+
+    def _add_segment_header(self, seg):
+        """ Adds a new segment to the Program Header within ELF file
+        """
+        n = self['e_phnum']
+        self._segment_update[n] = seg
+        self.header['e_phnum'] += 1
+        return n
+
+    def _reorder_segment_headers(self):
+        """ Changes order of segment headers, also merges them when possible.
+        """
+        all_segments = []
+        for seg in self.iter_segments():
+            all_segments.append(seg)
+        # Sort by mem address; according to ELF format spec,
+        # LOAD segments have to be sorted this way
+        all_segments = sorted(all_segments, key=lambda seg: (seg['p_type'],seg['p_vaddr'],seg['p_memsz']))
+        self._segment_update.clear()
+        self.header['e_phnum'] = 0
+        seg = all_segments[0]
+        for i in range(1,len(all_segments)):
+            prev_seg = seg
+            seg = all_segments[i]
+            if (self.segments_are_equivalent(seg, prev_seg) and
+              seg['p_vaddr'] == prev_seg['p_vaddr'] + prev_seg['p_memsz'] and
+              seg['p_offset'] == prev_seg['p_offset'] + prev_seg['p_filesz']):
+                seg.header['p_memsz'] += prev_seg['p_memsz']
+                seg.header['p_vaddr'] = prev_seg['p_vaddr']
+                seg.header['p_filesz'] += prev_seg['p_filesz']
+                seg.header['p_offset'] = prev_seg['p_offset']
+                # extend current segment to include previous one
+                continue
+            self._add_segment_header(prev_seg)
+        self._add_segment_header(seg)
 
     def _write_segment_header(self, n, hdr):
         """ Writes the header of segment back into file.
