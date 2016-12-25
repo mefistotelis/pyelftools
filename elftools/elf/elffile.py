@@ -101,6 +101,9 @@ class ELFFile(object):
         return self._make_section(section_header)
 
     def set_section(self, n, obj):
+        # Map sections to segments
+        sect_to_seg = self.prepare_section_to_segment_mapping()
+        # Replace section definition
         old_obj = self.get_section(n)
         self._update_section_header(n, obj)
         if old_obj.name != obj.name:
@@ -110,46 +113,10 @@ class ELFFile(object):
             #TODO if section index is beyond existing, add new section
             raise ELFError('Adding new sections is not implemented yet')
         if obj['sh_size'] != old_obj['sh_size']:
-            #TODO if section data length changed, prepare modifications for the subsequent sections
-            # Prepare an array of all sections, sorted by offset
-            all_sections = []
-            for i in range(0, self['e_shnum']):
-                nx_obj = self.get_section(i)
-                all_sections.append({'i' : i, 'obj' : nx_obj})
-            # Treat main header as a special section
-            if 1:
-                section_header = {'sh_offset' : 0, 'sh_size' : self['e_ehsize'], 'sh_addralign' : 0x20, 'sh_type' : 'SHT_PROGBITS'}
-                nx_obj = Section(section_header, "main_header_dummy_container", None)
-                all_sections.append({'i' : -1, 'obj' : nx_obj})
-            # Treat program header table as a special section
-            if self['e_phoff'] > 0:
-                section_header = {'sh_offset' : self['e_phoff'], 'sh_size' : self['e_phnum'] * self['e_phentsize'], 'sh_addralign' : 0x20, 'sh_type' : 'SHT_PROGBITS'}
-                nx_obj = Section(section_header, "program_headers_dummy_container", None)
-                all_sections.append({'i' : -2, 'obj' : nx_obj})
-            # Treat section header table as a special section
-            if self['e_shoff'] > 0:
-                section_header = {'sh_offset' : self['e_shoff'], 'sh_size' : self['e_shnum'] * self['e_shentsize'], 'sh_addralign' : 0x20, 'sh_type' : 'SHT_PROGBITS'}
-                nx_obj = Section(section_header, "section_headers_dummy_container", None)
-                all_sections.append({'i' : -3, 'obj' : nx_obj})
-            # Sort by offset
-            all_sections = sorted(all_sections, key=lambda nx: nx['obj']['sh_offset'])
-            # Now go through the sections and update them to make sure they don't overlap in file
-            pv_end_offs = 0
-            for nx in all_sections:
-                i = nx['i']
-                nx_obj = nx['obj']
-                if nx_obj['sh_offset'] != pv_end_offs:
-                    if (not nx_obj.is_data_modified()) and (i >= 0) and (nx_obj['sh_type'] != 'SHT_NOBITS'):
-                        nx_obj.set_data(nx_obj.data())
-                    nx_obj.header['sh_offset'] = pv_end_offs
-                if (i >= 0):
-                    self._update_section_header(i, nx_obj)
-                elif (i == -2):
-                     self.header['e_phoff'] = nx_obj['sh_offset']
-                elif (i == -3):
-                     self.header['e_shoff'] = nx_obj['sh_offset']
-                self.shift_segment_offsets_range(nx['obj']['sh_offset'], nx['obj']['sh_size'], nx_obj['sh_offset'], nx_obj['sh_size'])
-                pv_end_offs = nx_obj['sh_offset'] + nx_obj['sh_size']
+            # if section data length changed, prepare offsets to make sure they wont overlap
+            self.linearize_sections()
+        if obj['sh_size'] != old_obj['sh_size'] or obj['sh_addr'] != old_obj['sh_addr']:
+            self.update_segments_to_sections_mapping(sect_to_seg)
 
     def get_section_by_name(self, name):
         """ Get a section from the file, by name. Return None if no such
@@ -187,21 +154,6 @@ class ELFFile(object):
         segment_header = self._get_segment_header(n)
         return self._make_segment(segment_header)
 
-    def shift_segment_offsets_range(self, prev_start, prev_size, next_start, next_size):
-        """ Update segment headers so that given range of offsets is mapped to the new range.
-        """
-        for i in range(self.num_segments()):
-            seg = self.get_segment(i)
-            if (seg['p_offset'] <= prev_start) and (seg['p_offset'] + seg['p_filesz'] > prev_start):
-                if seg['p_offset'] + seg['p_filesz'] >= prev_start + prev_size:
-                    seg.header['p_filesz'] += next_size - prev_size
-                seg.header['p_offset'] += next_start - prev_start
-            elif (seg['p_offset'] <= prev_start + prev_size) and (seg['p_offset'] + seg['p_filesz'] > prev_start + prev_size):
-                seg.header['p_filesz'] += next_start - prev_start
-            else:
-                continue
-            self._update_segment_header(i, seg)
-
     def iter_segments(self):
         """ Yield all the segments in the file
         """
@@ -222,6 +174,97 @@ class ELFFile(object):
             if (start >= seg['p_vaddr'] and
                 end <= seg['p_vaddr'] + seg['p_filesz']):
                 yield start - seg['p_vaddr'] + seg['p_offset']
+
+    def linearize_sections(self):
+        # Prepare an array of all sections, sorted by offset
+        all_sections = []
+        for i in range(0, self['e_shnum']):
+            obj = self.get_section(i)
+            all_sections.append({'i' : i, 'obj' : obj, 'seg' : -1})
+        # Treat main header as a special section
+        if 1:
+            section_header = {'sh_offset' : 0, 'sh_size' : self['e_ehsize'], 'sh_addralign' : 0x20, 'sh_type' : 'SHT_PROGBITS'}
+            obj = Section(section_header, "main_header_dummy_container", None)
+            all_sections.append({'i' : -1, 'obj' : obj, 'seg' : -1})
+        # Treat program header table as a special section
+        if self['e_phoff'] > 0:
+            section_header = {'sh_offset' : self['e_phoff'], 'sh_size' : self['e_phnum'] * self['e_phentsize'], 'sh_addralign' : 0x20, 'sh_type' : 'SHT_PROGBITS'}
+            # Allocate space for additional entries, just in case we will decide to divide a segment
+            if (self['e_phnum'] < self['e_shnum']): section_header['sh_size'] = self['e_shnum'] * self['e_phentsize']
+            obj = Section(section_header, "program_headers_dummy_container", None)
+            all_sections.append({'i' : -2, 'obj' : obj, 'seg' : -1})
+        # Treat section header table as a special section
+        if self['e_shoff'] > 0:
+            section_header = {'sh_offset' : self['e_shoff'], 'sh_size' : self['e_shnum'] * self['e_shentsize'], 'sh_addralign' : 0x20, 'sh_type' : 'SHT_PROGBITS'}
+            obj = Section(section_header, "section_headers_dummy_container", None)
+            all_sections.append({'i' : -3, 'obj' : obj, 'seg' : -1})
+        # Sort by offset
+        all_sections = sorted(all_sections, key=lambda nx: nx['obj']['sh_offset'])
+        # Now go through the sections and update them to make sure they don't overlap in file, and go closely after each other
+        pv_end_offs = 0
+        for nx in all_sections:
+            i = nx['i']
+            obj = nx['obj']
+            if obj['sh_offset'] != pv_end_offs:
+                if (not obj.is_data_modified()) and (i >= 0) and (obj['sh_type'] != 'SHT_NOBITS'):
+                    obj.set_data(obj.data())
+                obj.header['sh_offset'] = pv_end_offs
+            if (i >= 0):
+                self._update_section_header(i, obj)
+            elif (i == -2):
+                self.header['e_phoff'] = obj['sh_offset']
+            elif (i == -3):
+                self.header['e_shoff'] = obj['sh_offset']
+            if (obj['sh_type'] != 'SHT_NOBITS'):
+                pv_end_offs = obj['sh_offset'] + obj['sh_size']
+            else:
+                pv_end_offs = obj['sh_offset']
+
+    def prepare_section_to_segment_mapping(self):
+        sect_to_seg = [-1] * self['e_shnum']
+        for nseg in range(0, self['e_phnum']):
+            seg = self.get_segment(nseg)
+            for i in range(0, self['e_shnum']):
+                obj = self.get_section(i)
+                if (seg.section_in_segment(obj)):
+                    sect_to_seg[i] = nseg
+        return sect_to_seg
+
+    def update_segments_to_sections_mapping(self, sect_to_seg):
+        #TODO this function should be able to divide a segment when new disk area or memory area is not continous
+        # Mark used segments for update
+        for nseg in set(sect_to_seg):
+            if (nseg < 0): continue
+            seg = self.get_segment(nseg)
+            seg.header['p_offset'] = -1
+            self._update_segment_header(nseg, seg)
+        # Update used segments to represent the updated sections
+        for i in range(0, self['e_shnum']):
+            obj = self.get_section(i)
+            nseg = sect_to_seg[i]
+            if (nseg < 0):
+                continue
+            # Update segment
+            seg = self.get_segment(nseg)
+            if seg['p_offset'] == -1:
+                seg.header['p_offset'] = obj['sh_offset']
+                seg.header['p_filesz'] = obj['sh_size']
+                seg.header['p_vaddr'] = obj['sh_addr']
+                seg.header['p_paddr'] = obj['sh_addr']
+                seg.header['p_memsz'] = obj['sh_size']
+            else:
+                if seg['p_offset'] > obj['sh_offset']:
+                    seg.header['p_filesz'] += seg['p_offset'] - obj['sh_offset']
+                    seg.header['p_offset'] = obj['sh_offset']
+                elif seg['p_offset'] + seg['p_filesz'] < obj['sh_offset'] + obj['sh_size']:
+                    seg.header['p_filesz'] = obj['sh_offset'] + obj['sh_size'] - seg['p_offset']
+                if seg['p_vaddr'] > obj['sh_addr']:
+                    seg.header['p_memsz'] += seg['p_vaddr'] - obj['sh_addr']
+                    seg.header['p_vaddr'] = obj['sh_addr']
+                    seg.header['p_paddr'] = obj['sh_addr']
+                elif seg['p_vaddr'] + seg['p_memsz'] < obj['sh_addr'] + obj['sh_size']:
+                    seg.header['p_memsz'] = obj['sh_addr'] + obj['sh_size'] - seg['p_vaddr']
+            self._update_segment_header(nseg, seg)
 
     def has_dwarf_info(self):
         """ Check whether this file appears to have debugging information.
