@@ -8,6 +8,7 @@
 #-------------------------------------------------------------------------------
 import io
 import struct
+import copy
 import zlib
 
 try:
@@ -95,7 +96,7 @@ class ELFFile(object):
             subclass)
         """
         if n in self._section_update:
-            return self._section_update[n]
+            return copy.copy(self._section_update[n])
         section_header = self._get_section_header(n)
         return self._make_section(section_header)
 
@@ -182,7 +183,7 @@ class ELFFile(object):
         """ Get the segment at index #n from the file (Segment object)
         """
         if n in self._segment_update:
-            return self._segment_update[n]
+            return copy.copy(self._segment_update[n])
         segment_header = self._get_segment_header(n)
         return self._make_segment(segment_header)
 

@@ -17,6 +17,10 @@ class Segment(object):
         self.header = header
         self.stream = stream
 
+    def __copy__(self):
+        newone = type(self)(self.header.copy(), self.stream)
+        return newone
+
     def data(self):
         """ The segment data from the file.
         """

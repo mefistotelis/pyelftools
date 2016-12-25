@@ -25,6 +25,11 @@ class Section(object):
         self.stream = stream
         self._data_update = None
 
+    def __copy__(self):
+        newone = type(self)(self.header.copy(), self.name, self.stream)
+        newone._data_update = self._data_update
+        return newone
+
     def data(self):
         """ The section data, either from the stream, or updated.
         """
