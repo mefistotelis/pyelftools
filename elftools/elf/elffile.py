@@ -105,21 +105,49 @@ class ELFFile(object):
     def set_section(self, n, obj):
         # Map sections to segments
         sect_to_seg = self.prepare_section_to_segment_mapping()
+        # Check if it's a new section or update
+        if n >= self['e_shnum']:
+            raise ELFError('Adding new sections this way is not implemented')
         # Replace section definition
         old_obj = self.get_section(n)
         self._update_section_header(n, obj)
         if old_obj.name != obj.name:
-            #TODO if section name changed, prepare to update it
-            raise ELFError('Renaming sections on update is not implemented yet')
-        if n >= self['e_shnum']:
-            #TODO if section index is beyond existing, add new section
-            raise ELFError('Adding new sections is not implemented yet')
+            self._set_section_name(obj.header, obj.name)
+            self._section_name_map = None
         if obj['sh_size'] != old_obj['sh_size']:
             # if section data length changed, prepare offsets to make sure they wont overlap
             self.linearize_sections()
         if obj['sh_size'] != old_obj['sh_size'] or obj['sh_addr'] != old_obj['sh_addr']:
             self.update_segments_to_sections_mapping(sect_to_seg)
             self._reorder_segment_headers()
+
+    def insert_section(self, n, obj):
+        # Map sections to segments
+        sect_to_seg = self.prepare_section_to_segment_mapping()
+        # Check if it's a new section or update
+        if n > self['e_shnum']:
+            raise ELFError('Adding new sections beyond existing ones is not implemented')
+        # Make sure headers of all sections beyond the one added are reordered and stored in memory
+        for i in range(self['e_shnum'], n, -1):
+            if i-1 != self['e_shstrndx']:
+               nx_obj = self.get_section(i-1)
+            else:
+               self.header['e_shstrndx'] = i
+               nx_obj = self._file_stringtable_section
+            self._update_section_header(i, nx_obj)
+        self.header['e_shnum'] += 1
+        # Insert section definition
+        self._set_section_name(obj.header, obj.name)
+        self._section_name_map = None
+        self._update_section_header(n, obj)
+        if n+1 != self['e_shnum']:
+            # if section data was added in the middle, prepare offsets to make sure they wont overlap
+            self.linearize_sections()
+        if n > 0:
+            sect_to_seg.insert(n, sect_to_seg[n-1])
+        else:
+            sect_to_seg.insert(n, sect_to_seg[n])
+        self.update_segments_to_sections_mapping(sect_to_seg)
 
     def get_section_by_name(self, name):
         """ Get a section from the file, by name. Return None if no such
@@ -134,6 +162,14 @@ class ELFFile(object):
     def set_section_by_name(self, name, obj):
         secnum = self._get_section_number_by_name(name)
         self.set_section(secnum, obj)
+
+    def insert_section_at_end(self, obj):
+        secnum = self['e_shnum']
+        self.insert_section(secnum, obj)
+
+    def insert_section_after(self, name, obj):
+        secnum = self._get_section_number_by_name(name)
+        self.insert_section(secnum+1, obj)
 
     def iter_sections(self):
         """ Yield all the sections in the file
@@ -481,6 +517,13 @@ class ELFFile(object):
         name_offset = section_header['sh_name']
         return self._file_stringtable_section.get_string(name_offset)
 
+    def _set_section_name(self, section_header, name):
+        """ Given a section header and name, stores this section's name
+            in the file's string table, and updates offset in header
+        """
+        name_offset = self._file_stringtable_section.add_string(name)
+        section_header['sh_name'] = name_offset
+
     def _get_section_number_by_name(self, name):
         """ Get number of a section, by name. Return None if no such
             section exists.
@@ -632,6 +675,8 @@ class ELFFile(object):
         """ Find the file's string table section
         """
         stringtable_section_num = self['e_shstrndx']
+        if stringtable_section_num in self._section_update:
+            return copy.copy(self._section_update[stringtable_section_num])
         return StringTableSection(
                 header=self._get_section_header(stringtable_section_num),
                 name='',

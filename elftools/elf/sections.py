@@ -98,6 +98,23 @@ class StringTableSection(Section):
             s = parse_cstring_from_stream(self.stream, table_offset + offset)
         return s.decode('ascii')
 
+    def add_string(self, s):
+        """ Add the string at end of this string table.
+        """
+        data_buf = self.data()
+        offset = len(data_buf)-1
+        while data_buf[offset] == 0:
+            offset -= 1
+        if data_buf[offset] != 0:
+            offset += 1
+        data_buf = data_buf[0:offset]
+        data_buf += b'\0' + s.encode('ascii') + b'\0'
+        offset += 1
+        if self.header['sh_size'] > len(data_buf):
+            data_buf += b'\0' * (self.header['sh_size'] - len(data_buf))
+        self.set_data(data_buf)
+        return offset
+
 
 class SymbolTableSection(Section):
     """ ELF symbol table section. Has an associated StringTableSection that's
