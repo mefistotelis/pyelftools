@@ -102,6 +102,8 @@ class ELFFile(object):
         """ Get the section at index #n from the file (Section object or a
             subclass)
         """
+        if n == self['e_shstrndx']:
+            return copy.copy(self._file_stringtable_section)
         if n in self._section_update:
             return copy.copy(self._section_update[n])
         section_header = self._get_section_header(n)
@@ -134,11 +136,11 @@ class ELFFile(object):
             raise ELFError('Adding new sections beyond existing ones is not implemented')
         # Make sure headers of all sections beyond the one added are reordered and stored in memory
         for i in range(self['e_shnum'], n, -1):
-            if i-1 != self['e_shstrndx']:
-               nx_obj = self.get_section(i-1)
-            else:
+            nx_obj = self.get_section(i-1)
+            # Change strings section index before update, to make
+            # sure _file_stringtable_section gets updated too
+            if i-1 == self['e_shstrndx']:
                self.header['e_shstrndx'] = i
-               nx_obj = self._file_stringtable_section
             self._update_section_header(i, nx_obj)
         self.header['e_shnum'] += 1
         # Insert section definition
@@ -508,6 +510,8 @@ class ELFFile(object):
         """ Update the header of section #n, by storing a new header
         """
         self._section_update[n] = obj
+        if n == self['e_shstrndx']:
+            self._file_stringtable_section = obj
 
     def _write_section_header(self, n, hdr):
         """ Writes the header of section back into file.
