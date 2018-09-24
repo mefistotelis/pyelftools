@@ -74,6 +74,11 @@ class ELFFile(object):
         self._file_stringtable_section = self._get_file_stringtable()
         self._section_name_map = None
 
+        if self._file_stringtable_section is not None:
+            # We could not set stringtable section name without stringtable section
+            # Now when the chicken-and-egg issue is solved, we should set it properly
+            self._file_stringtable_section.name = self._get_section_name(self._file_stringtable_section.header)
+
     def write_changes(self):
         """ Writes any modifications in headers
         """
